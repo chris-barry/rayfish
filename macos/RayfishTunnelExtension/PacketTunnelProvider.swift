@@ -157,6 +157,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             case .quicLossTolerant: key = .quicLossTolerant
             }
             try node.setSetting(key: key, enabled: enabled)
+        case .setFileAutoAccept:
+            guard let peer = request.peer, !peer.isEmpty, let allow = request.enabled else {
+                throw ProviderError.missingSetting
+            }
+            guard let owner = TunnelOwner.uid(in: (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration) else {
+                throw ProviderError.missingOwner
+            }
+            try node.setFileAutoAccept(peer: peer, allow: allow, ownerUid: owner)
         case .setSSHRule:
             guard let network = request.name, let peer = request.id,
                   let users = request.users, let allow = request.enabled else { throw ProviderError.missingSetting }
@@ -291,6 +299,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             },
             sshEnabled: status.ssh.enabled,
             sshRules: status.ssh.rules.map { ProviderSSHRule(network: $0.network, peer: $0.peer, users: $0.users) },
+            fileAutoAcceptPeers: status.fileAutoAcceptPeers,
             connectionWarning: status.connectionWarning,
             quicLossTolerant: status.services.quicLossTolerant
         )

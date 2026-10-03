@@ -1327,6 +1327,7 @@ impl Daemon {
 fn global_set_message(cfg: &AppConfig, key: GlobalKey, reset: bool) -> String {
     let restart = "Restart the daemon for changes to take effect.";
     match key {
+        GlobalKey::FileAutoAcceptPeers => "File auto-accept peers updated.".to_string(),
         GlobalKey::Mdns => format!(
             "mDNS discovery {}.",
             if cfg.mdns_enabled {
@@ -3359,6 +3360,57 @@ mod headless_tests {
 
         // The embedding `status()` API answers without a socket ever being bound.
         assert!(matches!(daemon.status(), IpcMessage::StatusResponse { .. }));
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_auto_accept_persists_exact_peers_without_a_network() {
+        let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvVarGuard::set("RAYFISH_CONFIG_DIR", tmp.path());
+        let daemon = build_headless(false).await.unwrap();
+        let first = SecretKey::from([41; 32]).public();
+        let second = SecretKey::from([42; 32]).public();
+        assert!(!daemon.files.should_auto_accept_file(first));
+        assert!(!daemon.files.should_auto_accept_file(second));
+        assert!(matches!(
+            daemon.set_file_auto_accept(&first.to_string(), true).await,
+            IpcMessage::Ok { .. }
+        ));
+        assert!(matches!(
+            daemon.set_file_auto_accept(&second.to_string(), true).await,
+            IpcMessage::Ok { .. }
+        ));
+        assert_eq!(
+            config::load().unwrap().file_auto_accept_peers,
+            vec![first, second]
+        );
+        assert!(daemon.files.should_auto_accept_file(first));
+        assert!(daemon.files.should_auto_accept_file(second));
+        assert!(
+            !daemon
+                .files
+                .should_auto_accept_file(SecretKey::from([43; 32]).public())
+        );
+        assert!(matches!(
+            daemon.set_file_auto_accept("unknown-peer", true).await,
+            IpcMessage::Error { .. }
+        ));
+        assert!(matches!(
+            daemon.set_file_auto_accept("", true).await,
+            IpcMessage::Error { .. }
+        ));
+        assert_eq!(
+            config::load().unwrap().file_auto_accept_peers,
+            vec![first, second]
+        );
+        assert!(matches!(
+            daemon.set_file_auto_accept(&first.to_string(), false).await,
+            IpcMessage::Ok { .. }
+        ));
+        assert_eq!(config::load().unwrap().file_auto_accept_peers, vec![second]);
+        assert!(!daemon.files.should_auto_accept_file(first));
+        assert!(daemon.files.should_auto_accept_file(second));
     }
 
     /// `net_config_apply` gates on the network's presence ON DISK, not in the

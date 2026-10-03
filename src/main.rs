@@ -1298,17 +1298,20 @@ pub(crate) enum FilesAction {
         /// Transfer ID (from 'ray files')
         id: u64,
     },
-    /// Auto-accept offers from your own devices (on|off)
+    /// Auto-accept files from trusted peers or your own devices
     ///
-    /// Per network, and only for your own paired devices. `on` also drains any
-    /// already-queued offers from them; `off` stops future auto-accept.
+    /// Use add/remove/list for exact peers, or <network> on|off for your own
+    /// paired devices. Enabling also accepts already-pending offers.
+    #[command(subcommand_negates_reqs = true, args_conflicts_with_subcommands = true)]
     AutoAccept {
-        /// Network name
-        #[arg(add = complete::networks())]
-        network: String,
+        #[command(subcommand)]
+        action: Option<FilesAutoAcceptAction>,
+        /// Network name (own devices only)
+        #[arg(required = true, add = complete::networks())]
+        network: Option<String>,
         /// `on` or `off`
-        #[arg(add = complete::words(&ON_OFF))]
-        state: String,
+        #[arg(required = true, add = complete::words(&ON_OFF))]
+        state: Option<String>,
     },
     /// Set the directory auto-accepted files are written to
     ///
@@ -1334,6 +1337,23 @@ pub(crate) enum FilesAction {
         #[arg(long)]
         clear: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum FilesAutoAcceptAction {
+    /// Trust this exact peer to send files without approval
+    Add {
+        #[arg(add = complete::peers())]
+        peer: String,
+    },
+    /// Remove this peer from the trusted senders
+    Remove {
+        #[arg(add = complete::peers())]
+        peer: String,
+    },
+    /// List trusted sender identities
+    #[command(visible_alias = "ls")]
+    List,
 }
 
 fn check_root() {
@@ -2072,6 +2092,41 @@ mod tests {
             ));
         }
         assert!(Cli::try_parse_from(["ray", "identityof"]).is_err());
+    }
+
+    #[test]
+    fn file_auto_accept_supports_peers_and_legacy_network_toggle() {
+        for operation in ["add", "remove"] {
+            let cli = Cli::try_parse_from(["ray", "files", "auto-accept", operation, "build-box"])
+                .unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Files {
+                    action: Some(FilesAction::AutoAccept {
+                        action: Some(_),
+                        ..
+                    }),
+                    ..
+                }
+            ));
+        }
+        for operation in ["list", "ls"] {
+            assert!(Cli::try_parse_from(["ray", "files", "auto-accept", operation]).is_ok());
+        }
+        for state in ["on", "off"] {
+            let cli =
+                Cli::try_parse_from(["ray", "files", "auto-accept", "network-a", state]).unwrap();
+            assert!(
+                matches!(cli.command, Command::Files { action: Some(FilesAction::AutoAccept { action: None, network: Some(network), state: Some(_), }), .. } if network == "network-a")
+            );
+        }
+        for args in [
+            vec!["ray", "files", "auto-accept"],
+            vec!["ray", "files", "auto-accept", "add"],
+            vec!["ray", "files", "auto-accept", "network-a"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
     }
 
     #[test]

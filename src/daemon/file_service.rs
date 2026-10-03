@@ -345,10 +345,8 @@ impl FileService {
                                 });
                             }
                             self.transfers.changed();
-                            // Evaluate own-device auto-accept directly: it accepts
-                            // only offers from our own paired devices on an opted-in
-                            // network, and no-ops otherwise, so the offer stays
-                            // queued for `ray files accept` unless it qualifies. We
+                            // Evaluate trusted-peer and own-device auto-accept.
+                            // Other offers stay queued for manual acceptance. We
                             // are already in a per-connection task, so awaiting the
                             // fetch here blocks only this offer.
                             self.try_auto_accept_file(id).await;
@@ -383,12 +381,18 @@ impl FileService {
         self.device_user_map.resolve(&from) == own_user
     }
 
+    pub(crate) fn should_auto_accept_file(&self, from: EndpointId) -> bool {
+        let trusted = config::load()
+            .map(|cfg| cfg.file_auto_accept_peers.contains(&from))
+            .unwrap_or(false);
+        trusted
+            || (self.is_own_device_sender(from) && self.registry.member_on_autoaccept_network(from))
+    }
+
     /// Evaluate a newly-queued (or already-pending) file offer against the
-    /// own-devices auto-accept policy and, if it qualifies, accept it without
-    /// user action. A no-op (offer stays queued) unless: the sender resolves to
-    /// *our own* user identity (a paired device) **and** it is a member of at
-    /// least one network with `auto_accept_files` enabled. Never removes the
-    /// pending entry unless it actually accepts (via `accept_file`).
+    /// trusted-peer or own-device policy. Explicit trust applies to the exact
+    /// sender identity. Own devices still require an opted-in shared network.
+    /// Leaves the offer queued unless it actually accepts via `accept_file`.
     pub(crate) async fn try_auto_accept_file(self: &Arc<Self>, id: u64) {
         // Peek the offer's sender without consuming the queue entry.
         let from = {
@@ -399,14 +403,7 @@ impl FileService {
             }
         };
 
-        // Own-device gate: the sender must resolve to one of our own paired
-        // devices.
-        if !self.is_own_device_sender(from) {
-            return;
-        }
-
-        // Network gate: the sender must be a member of a network we've enabled.
-        if !self.registry.member_on_autoaccept_network(from) {
+        if !self.should_auto_accept_file(from) {
             return;
         }
 
@@ -427,7 +424,7 @@ impl FileService {
 
         match self.accept_file(id, output, cred).await {
             IpcMessage::Ok { message } => {
-                tracing::info!(from = %from.fmt_short(), %message, "file auto-accepted from own device");
+                tracing::info!(from = %from.fmt_short(), %message, "file auto-accepted");
             }
             IpcMessage::Error { message } => {
                 tracing::warn!(from = %from.fmt_short(), %message, "file auto-accept failed");
@@ -1051,9 +1048,8 @@ impl FileService {
     }
 
     /// Sweep the queued file offers, accepting any that now qualify. Called
-    /// after `net.auto-accept-files` is turned on so a file that arrived before
-    /// the toggle still lands, instead of sitting in the queue until the sender
-    /// retries.
+    /// after a peer is trusted or own-device auto-accept is enabled, so earlier
+    /// offers do not wait for the sender to retry.
     pub(crate) async fn drain_auto_acceptable(self: &Arc<Self>) {
         let ids: Vec<u64> = self
             .pending_files

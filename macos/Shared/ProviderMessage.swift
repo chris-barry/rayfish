@@ -17,6 +17,7 @@ struct ProviderRequest: Codable {
         case rejectConnection
         case acceptFile
         case rejectFile
+        case setFileAutoAccept
         case setSSHRule
         case firewallShow
         case firewallAdd
@@ -92,6 +93,7 @@ struct ProviderStatus: Codable, Equatable {
     var files: [ProviderFile]? = nil
     var sshEnabled: Bool? = nil
     var sshRules: [ProviderSSHRule]? = nil
+    var fileAutoAcceptPeers: [String]? = nil
     var connectionWarning: String? = nil
     var quicLossTolerant: Bool? = nil
 }

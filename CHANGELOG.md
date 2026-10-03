@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `ray files auto-accept add/remove <peer>` saves trusted file senders; `list`
+  shows their identities. The macOS Files page can add and remove them too.
+
 - `ray status` and the macOS app warn when a peer connection has high latency,
   packet loss, or a backed-up send queue.
 

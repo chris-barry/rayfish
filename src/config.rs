@@ -660,7 +660,10 @@ pub struct AppConfig {
     /// `auto_update_last_target` for the backoff guard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_update_last_attempt: Option<i64>,
-    /// Absolute directory where auto-accepted (own-device) files are written.
+    /// Exact device identities allowed to send files without approval.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_auto_accept_peers: Vec<EndpointId>,
+    /// Absolute directory where auto-accepted files are written.
     /// `None` falls back to `download_user`, then the operator's ~/Downloads.
     /// Set via `ray files download-dir <path>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -722,6 +725,7 @@ impl Default for AppConfig {
             auto_update: false,
             auto_update_last_target: None,
             auto_update_last_attempt: None,
+            file_auto_accept_peers: Vec::new(),
             download_dir: None,
             download_user: None,
             networks: Vec::new(),
@@ -891,6 +895,8 @@ struct Settings {
     auto_update_last_attempt: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     download_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    file_auto_accept_peers: Vec<EndpointId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     download_user: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1451,6 +1457,7 @@ fn load_in(dir: &Path) -> Result<AppConfig> {
         auto_update: settings.auto_update,
         auto_update_last_target: settings.auto_update_last_target,
         auto_update_last_attempt: settings.auto_update_last_attempt,
+        file_auto_accept_peers: settings.file_auto_accept_peers,
         download_dir: settings.download_dir,
         download_user: settings.download_user,
         networks,
@@ -1527,6 +1534,7 @@ fn settings_toml(config: &AppConfig) -> Result<String> {
         auto_update: config.auto_update,
         auto_update_last_target: config.auto_update_last_target.clone(),
         auto_update_last_attempt: config.auto_update_last_attempt,
+        file_auto_accept_peers: config.file_auto_accept_peers.clone(),
         download_dir: config.download_dir.clone(),
         download_user: config.download_user,
         pending_joins: config.pending_joins.clone(),
@@ -2341,6 +2349,7 @@ name = "test"
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let cfg = AppConfig {
+            file_auto_accept_peers: vec![SecretKey::from([41; 32]).public()],
             download_dir: Some("/srv/incoming".to_string()),
             download_user: Some(1000),
             ..Default::default()
@@ -2350,6 +2359,7 @@ name = "test"
         let loaded = load_in(dir).unwrap();
         assert_eq!(loaded.download_dir.as_deref(), Some("/srv/incoming"));
         assert_eq!(loaded.download_user, Some(1000));
+        assert_eq!(loaded.file_auto_accept_peers, cfg.file_auto_accept_peers);
     }
 
     #[test]

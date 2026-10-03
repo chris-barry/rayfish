@@ -12,6 +12,7 @@ use std::net::IpAddr;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use iroh::EndpointId;
 
 pub use ray_proto::settings::{FirewallKey, GlobalKey, NetworkKey, NodeKey};
 
@@ -36,6 +37,26 @@ pub fn apply_global(cfg: &mut AppConfig, key: GlobalKey, value: &str, replace: b
     let entries = super::parse_entries(value);
     let reset = entries.is_empty() || entries == ["n0"];
     match key {
+        GlobalKey::FileAutoAcceptPeers => {
+            let mut peers = if replace || value.trim().is_empty() {
+                Vec::new()
+            } else {
+                cfg.file_auto_accept_peers.clone()
+            };
+            for entry in entries {
+                let (remove, identity) = match entry.strip_prefix('-') {
+                    Some(identity) => (true, identity),
+                    None => (false, entry.as_str()),
+                };
+                let peer: EndpointId = identity.parse().context("invalid peer identity")?;
+                if remove {
+                    peers.retain(|saved| *saved != peer);
+                } else if !peers.contains(&peer) {
+                    peers.push(peer);
+                }
+            }
+            cfg.file_auto_accept_peers = peers;
+        }
         GlobalKey::Mdns => cfg.mdns_enabled = parse_bool(value, true)?,
         GlobalKey::Dns => {
             cfg.dns_mode = if value.trim().is_empty() {
@@ -163,6 +184,12 @@ fn server_override(
 /// the compiler rejects a `GlobalKey` variant with no arm here.
 pub fn render_global(cfg: &AppConfig, key: GlobalKey) -> String {
     match key {
+        GlobalKey::FileAutoAcceptPeers => cfg
+            .file_auto_accept_peers
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
         GlobalKey::Mdns => on_off(cfg.mdns_enabled),
         GlobalKey::Dns => cfg.dns_mode.as_ref().to_string(),
         GlobalKey::QuicCongestion => cfg.quic_congestion.as_ref().to_string(),
@@ -276,6 +303,37 @@ fn parse_action(value: &str, default: Action) -> Result<Action> {
 mod tests {
     use super::super::empty_network_config as empty_network;
     use super::*;
+
+    #[test]
+    fn file_auto_accept_peers_are_exact_persistent_and_atomic() {
+        let mut cfg = AppConfig::default();
+        let first = iroh::SecretKey::from([41; 32]).public();
+        let second = iroh::SecretKey::from([42; 32]).public();
+        let key = GlobalKey::FileAutoAcceptPeers;
+        apply_global(&mut cfg, key, &first.to_string(), false).unwrap();
+        apply_global(&mut cfg, key, &first.to_string(), false).unwrap();
+        assert_eq!(cfg.file_auto_accept_peers, vec![first]);
+        assert!(!cfg.file_auto_accept_peers.contains(&second));
+        let persisted = toml::to_string(&cfg).unwrap();
+        let restored: AppConfig = toml::from_str(&persisted).unwrap();
+        assert_eq!(restored.file_auto_accept_peers, vec![first]);
+        assert!(apply_global(&mut cfg, key, &format!("{second},invalid"), false).is_err());
+        assert_eq!(cfg.file_auto_accept_peers, vec![first]);
+        apply_global(&mut cfg, key, &second.to_string(), false).unwrap();
+        apply_global(&mut cfg, key, &format!("-{first}"), false).unwrap();
+        assert_eq!(cfg.file_auto_accept_peers, vec![second]);
+        assert_eq!(render_global(&cfg, key), second.to_string());
+        apply_global(&mut cfg, key, &first.to_string(), true).unwrap();
+        assert_eq!(cfg.file_auto_accept_peers, vec![first]);
+        apply_global(&mut cfg, key, "", false).unwrap();
+        assert!(cfg.file_auto_accept_peers.is_empty());
+        assert!(
+            toml::from_str::<AppConfig>("")
+                .unwrap()
+                .file_auto_accept_peers
+                .is_empty()
+        );
+    }
 
     #[test]
     fn network_auto_accept_toggles_round_trip() {

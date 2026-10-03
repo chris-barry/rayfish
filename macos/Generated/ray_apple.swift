@@ -560,6 +560,8 @@ public protocol NodeProtocol: AnyObject, Sendable {
 
     func rejectFile(id: UInt64) throws
 
+    func setFileAutoAccept(peer: String, allow: Bool, ownerUid: UInt32) throws
+
     func setHostname(network: String, hostname: String) throws
 
     /**
@@ -816,6 +818,15 @@ open func rejectConnection(id: String)throws   {try rustCallWithError(FfiConvert
 open func rejectFile(id: UInt64)throws   {try rustCallWithError(FfiConverterTypeAppleError_lift) {
     uniffi_ray_apple_fn_method_node_reject_file(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(id),$0
+    )
+}
+}
+
+open func setFileAutoAccept(peer: String, allow: Bool, ownerUid: UInt32)throws   {try rustCallWithError(FfiConverterTypeAppleError_lift) {
+    uniffi_ray_apple_fn_method_node_set_file_auto_accept(self.uniffiClonePointer(),
+        FfiConverterString.lower(peer),
+        FfiConverterBool.lower(allow),
+        FfiConverterUInt32.lower(ownerUid),$0
     )
 }
 }
@@ -1912,16 +1923,18 @@ public struct NodeStatus {
     public var ssh: NodeSshStatus
     public var services: NodeServiceStatus
     public var connectionWarning: String?
+    public var fileAutoAcceptPeers: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(mesh: NodeMeshStatus, requests: NodeRequestStatus, files: [IncomingFile], ssh: NodeSshStatus, services: NodeServiceStatus, connectionWarning: String?) {
+    public init(mesh: NodeMeshStatus, requests: NodeRequestStatus, files: [IncomingFile], ssh: NodeSshStatus, services: NodeServiceStatus, connectionWarning: String?, fileAutoAcceptPeers: [String]) {
         self.mesh = mesh
         self.requests = requests
         self.files = files
         self.ssh = ssh
         self.services = services
         self.connectionWarning = connectionWarning
+        self.fileAutoAcceptPeers = fileAutoAcceptPeers
     }
 }
 
@@ -1950,6 +1963,9 @@ extension NodeStatus: Equatable, Hashable {
         if lhs.connectionWarning != rhs.connectionWarning {
             return false
         }
+        if lhs.fileAutoAcceptPeers != rhs.fileAutoAcceptPeers {
+            return false
+        }
         return true
     }
 
@@ -1960,6 +1976,7 @@ extension NodeStatus: Equatable, Hashable {
         hasher.combine(ssh)
         hasher.combine(services)
         hasher.combine(connectionWarning)
+        hasher.combine(fileAutoAcceptPeers)
     }
 }
 
@@ -1977,7 +1994,8 @@ public struct FfiConverterTypeNodeStatus: FfiConverterRustBuffer {
                 files: FfiConverterSequenceTypeIncomingFile.read(from: &buf),
                 ssh: FfiConverterTypeNodeSshStatus.read(from: &buf),
                 services: FfiConverterTypeNodeServiceStatus.read(from: &buf),
-                connectionWarning: FfiConverterOptionString.read(from: &buf)
+                connectionWarning: FfiConverterOptionString.read(from: &buf),
+                fileAutoAcceptPeers: FfiConverterSequenceString.read(from: &buf)
         )
     }
 
@@ -1988,6 +2006,7 @@ public struct FfiConverterTypeNodeStatus: FfiConverterRustBuffer {
         FfiConverterTypeNodeSshStatus.write(value.ssh, into: &buf)
         FfiConverterTypeNodeServiceStatus.write(value.services, into: &buf)
         FfiConverterOptionString.write(value.connectionWarning, into: &buf)
+        FfiConverterSequenceString.write(value.fileAutoAcceptPeers, into: &buf)
     }
 }
 
@@ -2797,6 +2816,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_apple_checksum_method_node_reject_file() != 4388) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ray_apple_checksum_method_node_set_file_auto_accept() != 29610) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ray_apple_checksum_method_node_set_hostname() != 15380) {

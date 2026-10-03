@@ -395,6 +395,10 @@ final class TunnelController: ObservableObject {
                                          directory: directory.path, uid: getuid(), gid: getgid()))
     }
 
+    func setFileAutoAccept(peer: String, allow: Bool) async -> Bool {
+        await perform(ProviderRequest(action: .setFileAutoAccept, enabled: allow, peer: peer)) != nil
+    }
+
     func rejectFile(_ file: ProviderFile) async {
         _ = await perform(ProviderRequest(action: .rejectFile, fileId: file.transferId))
     }

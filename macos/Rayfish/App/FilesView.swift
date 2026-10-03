@@ -3,10 +3,41 @@ import SwiftUI
 
 struct FilesView: View {
     @ObservedObject var controller: TunnelController
+    @State private var trustedPeer = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Files").font(RayfishTheme.heading()).foregroundColor(RayfishTheme.ink)
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Auto-accept from trusted peers").font(RayfishTheme.heading(15))
+                Text("Files from these exact devices save to your Downloads folder or configured download directory without asking.")
+                    .foregroundColor(RayfishTheme.muted)
+                ForEach(controller.status?.fileAutoAcceptPeers ?? [], id: \.self) { peer in
+                    HStack {
+                        Text(peerLabel(peer)).font(RayfishTheme.mono(11)).textSelection(.enabled)
+                        Spacer()
+                        Button("Remove") { Task { _ = await controller.setFileAutoAccept(peer: peer, allow: false) } }
+                    }
+                }
+                HStack {
+                    TextField("Peer name or identity", text: $trustedPeer)
+                    Menu("Choose peer") {
+                        ForEach(controller.status?.networks ?? []) { network in
+                            ForEach(network.peers) { peer in
+                                Button("\(peer.hostname) (\(network.name))") { trustedPeer = peer.identity ?? peer.ipv6 }
+                            }
+                        }
+                    }
+                    Button("Add") {
+                        Task {
+                            if await controller.setFileAutoAccept(peer: trustedPeer.trimmingCharacters(in: .whitespacesAndNewlines), allow: true) {
+                                trustedPeer = ""
+                            }
+                        }
+                    }.disabled(trustedPeer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                if let error = controller.error { Text(error).foregroundColor(RayfishTheme.amber) }
+            }.padding(14).rayfishCard().disabled(controller.status?.fileAutoAcceptPeers == nil)
             let files = controller.status?.files ?? []
             if files.isEmpty {
                 Text("Incoming files appear here.").foregroundColor(RayfishTheme.muted)
@@ -35,6 +66,10 @@ struct FilesView: View {
                 }.padding(14).rayfishCard()
             }
         }.disabled(controller.isLoading)
+    }
+
+    private func peerLabel(_ identity: String) -> String {
+        controller.status?.networks.flatMap { $0.peers }.first { $0.identity == identity }?.hostname ?? identity
     }
 
     private func chooseFolder(for file: ProviderFile) {

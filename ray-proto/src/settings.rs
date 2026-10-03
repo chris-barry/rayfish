@@ -88,6 +88,7 @@ setting_keys! {
         SshPort = "ssh-port", "mesh SSH port (1-65535, default 22)";
         V4Bridge = "v4-bridge", "reach this host's IPv4-only listeners over the mesh (on|off)";
         PfPassthrough = "pf-passthrough", "macOS: keep the mesh alive under another VPN's firewall (on|off)";
+        FileAutoAcceptPeers = "file-auto-accept-peers", "trusted file senders (peer identities, comma-separated; -identity to remove)";
         DownloadDir = "download-dir", "directory accepted files land in (absolute path, empty to clear)";
         DownloadUser = "download-user", "uid that owns accepted files (numeric, empty to clear)";
     }

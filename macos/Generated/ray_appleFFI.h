@@ -366,6 +366,11 @@ void uniffi_ray_apple_fn_method_node_reject_connection(void*_Nonnull ptr, RustBu
 void uniffi_ray_apple_fn_method_node_reject_file(void*_Nonnull ptr, uint64_t id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_SET_FILE_AUTO_ACCEPT
+#define UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_SET_FILE_AUTO_ACCEPT
+void uniffi_ray_apple_fn_method_node_set_file_auto_accept(void*_Nonnull ptr, RustBuffer peer, int8_t allow, uint32_t owner_uid, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_SET_HOSTNAME
 #define UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_FN_METHOD_NODE_SET_HOSTNAME
 void uniffi_ray_apple_fn_method_node_set_hostname(void*_Nonnull ptr, RustBuffer network, RustBuffer hostname, RustCallStatus *_Nonnull out_status
@@ -793,6 +798,12 @@ uint16_t uniffi_ray_apple_checksum_method_node_reject_connection(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_CHECKSUM_METHOD_NODE_REJECT_FILE
 #define UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_CHECKSUM_METHOD_NODE_REJECT_FILE
 uint16_t uniffi_ray_apple_checksum_method_node_reject_file(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_CHECKSUM_METHOD_NODE_SET_FILE_AUTO_ACCEPT
+#define UNIFFI_FFIDEF_UNIFFI_RAY_APPLE_CHECKSUM_METHOD_NODE_SET_FILE_AUTO_ACCEPT
+uint16_t uniffi_ray_apple_checksum_method_node_set_file_auto_accept(void
 
 );
 #endif

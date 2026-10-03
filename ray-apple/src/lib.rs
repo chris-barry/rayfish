@@ -67,6 +67,7 @@ pub struct NodeStatus {
     pub ssh: NodeSshStatus,
     pub services: NodeServiceStatus,
     pub connection_warning: Option<String>,
+    pub file_auto_accept_peers: Vec<String>,
 }
 
 #[derive(uniffi::Record)]
@@ -445,6 +446,11 @@ impl Node {
             ssh,
             services,
             connection_warning,
+            file_auto_accept_peers: settings
+                .file_auto_accept_peers
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
         })
     }
 
@@ -500,6 +506,42 @@ impl Node {
         config::update_settings(|settings| config::config_set(settings, key.into(), value, false))
             .map(|_| ())
             .map_err(AppleError::network)
+    }
+
+    pub fn set_file_auto_accept(
+        &self,
+        peer: String,
+        allow: bool,
+        owner_uid: u32,
+    ) -> Result<(), AppleError> {
+        let state = self.state()?;
+        if peer.trim().is_empty() || peer.contains(',') || peer.starts_with('-') {
+            return Err(AppleError::Network(
+                "a single peer name or identity is required".to_owned(),
+            ));
+        }
+        if allow {
+            if owner_uid == 0 {
+                return Err(AppleError::Network(
+                    "a non-root download owner is required".to_owned(),
+                ));
+            }
+            config::update_settings(|settings| {
+                if settings.download_dir.is_none()
+                    && settings.download_user.is_none()
+                    && settings.operator_uid.is_none()
+                {
+                    settings.download_user = Some(owner_uid);
+                }
+                Ok(())
+            })
+            .map_err(AppleError::network)?;
+        }
+        expect_ok(
+            self.runtime
+                .block_on(state.set_file_auto_accept(&peer, allow)),
+            "file auto-accept",
+        )
     }
 
     pub fn set_ssh_rule(
@@ -1015,6 +1057,26 @@ mod tests {
                         .unwrap();
                     assert!(node.status().unwrap().ssh.rules.is_empty());
                 }
+                let trusted =
+                    "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a".to_owned();
+                assert!(node.set_file_auto_accept(trusted.clone(), true, 0).is_err());
+                node.set_file_auto_accept(trusted.clone(), true, 1000)
+                    .unwrap();
+                assert_eq!(
+                    node.status().unwrap().file_auto_accept_peers,
+                    vec![trusted.clone()]
+                );
+                assert_eq!(config::load().unwrap().download_user, Some(1000));
+                config::update_settings(|settings| {
+                    settings.download_user = Some(1001);
+                    Ok(())
+                })
+                .unwrap();
+                node.set_file_auto_accept(trusted.clone(), true, 1000)
+                    .unwrap();
+                assert_eq!(config::load().unwrap().download_user, Some(1001));
+                node.set_file_auto_accept(trusted, false, 1000).unwrap();
+                assert!(node.status().unwrap().file_auto_accept_peers.is_empty());
                 let after = node.status().unwrap();
                 assert!(!after.services.dns_enabled);
                 assert!(!after.services.mdns_enabled);

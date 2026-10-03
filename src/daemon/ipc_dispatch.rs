@@ -156,6 +156,20 @@ impl Daemon {
         }
     }
 
+    /// Persist an exact peer's file auto-accept permission and apply it now.
+    pub async fn set_file_auto_accept(self: &Arc<Self>, peer: &str, allow: bool) -> IpcMessage {
+        if peer.trim().is_empty() || peer.contains(',') || peer.starts_with('-') {
+            return ipc_err("a single peer name or identity is required");
+        }
+        self.config_apply(
+            NodeKey::Global(GlobalKey::FileAutoAcceptPeers),
+            &format!("{}{peer}", if allow { "" } else { "-" }),
+            false,
+            false,
+        )
+        .await
+    }
+
     /// Apply one settings key and persist it. Serves `ray config set|unset` and
     /// every single-value command that used to carry its own IPC variant
     /// (`ray mdns`, `ray firewall on|off|reject|default`, `ray firewall ssh
@@ -176,6 +190,29 @@ impl Daemon {
         replace: bool,
         reset: bool,
     ) -> IpcMessage {
+        let resolved_value;
+        let value =
+            if key == NodeKey::Global(GlobalKey::FileAutoAcceptPeers) && !value.trim().is_empty() {
+                let mut identities = Vec::new();
+                for entry in config::parse_entries(value) {
+                    let (remove, name) = match entry.strip_prefix('-') {
+                        Some(name) => (true, name),
+                        None => (false, entry.as_str()),
+                    };
+                    let peer = match name.parse::<EndpointId>() {
+                        Ok(peer) => peer,
+                        Err(_) => match self.registry.resolve_peer_flexible(name).await {
+                            Some(peer) => peer,
+                            None => return ipc_err(format!("unknown peer '{name}'")),
+                        },
+                    };
+                    identities.push(format!("{}{peer}", if remove { "-" } else { "" }));
+                }
+                resolved_value = identities.join(",");
+                resolved_value.as_str()
+            } else {
+                value
+            };
         let key = match key {
             NodeKey::Firewall(k) => return self.registry.firewall_config_set(k, value),
             NodeKey::Global(GlobalKey::Dns) => return self.dns_config_set(value).await,
@@ -203,7 +240,8 @@ impl Daemon {
                 | GlobalKey::OnDemand
                 | GlobalKey::QuicCongestion
                 | GlobalKey::DownloadDir
-                | GlobalKey::DownloadUser),
+                | GlobalKey::DownloadUser
+                | GlobalKey::FileAutoAcceptPeers),
             ) => k,
         };
         let mut set_err = None;
@@ -221,6 +259,9 @@ impl Daemon {
             Ok(cfg) => cfg,
             Err(e) => return ipc_err(format!("failed to save config: {e}")),
         };
+        if key == GlobalKey::FileAutoAcceptPeers {
+            self.files.drain_auto_acceptable().await;
+        }
         IpcMessage::Ok {
             message: global_set_message(&app_config, key, reset),
         }

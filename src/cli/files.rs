@@ -309,6 +309,46 @@ pub(crate) async fn ipc_files(action: Option<FilesAction>) -> Result<()> {
     // These subcommands change (or read) global settings the daemon owns. They
     // route through the daemon so the write lands in the config dir the daemon
     // reads (see the config-writing commands note in main.rs / rayfish#94).
+    if let Some(FilesAction::AutoAccept {
+        action: Some(action),
+        ..
+    }) = &action
+    {
+        if let crate::FilesAutoAcceptAction::Add { peer }
+        | crate::FilesAutoAcceptAction::Remove { peer } = action
+        {
+            anyhow::ensure!(
+                !peer.trim().is_empty() && !peer.contains(',') && !peer.starts_with('-'),
+                "a single peer name or identity is required"
+            );
+        }
+        let key = NodeKey::Global(GlobalKey::FileAutoAcceptPeers);
+        return match action {
+            crate::FilesAutoAcceptAction::Add { peer } => {
+                crate::ipc_mutate(ipc::IpcMessage::ConfigSet {
+                    key,
+                    value: peer.clone(),
+                    replace: false,
+                })
+                .await
+            }
+            crate::FilesAutoAcceptAction::Remove { peer } => {
+                crate::ipc_mutate(ipc::IpcMessage::ConfigSet {
+                    key,
+                    value: format!("-{peer}"),
+                    replace: false,
+                })
+                .await
+            }
+            crate::FilesAutoAcceptAction::List => {
+                let peers = config_row(key).await?;
+                for peer in peers.split(',').filter(|peer| !peer.is_empty()) {
+                    println!("{peer}");
+                }
+                Ok(())
+            }
+        };
+    }
     match &action {
         Some(FilesAction::DownloadDir { path, clear }) => {
             if *clear {
@@ -437,7 +477,9 @@ pub(crate) async fn ipc_files(action: Option<FilesAction>) -> Result<()> {
                 other => fail_unexpected(&other),
             }
         }
-        Some(FilesAction::AutoAccept { network, state }) => {
+        Some(FilesAction::AutoAccept { network, state, .. }) => {
+            let network = network.context("network is required")?;
+            let state = state.context("state is required")?;
             parse_on_off(&state)?;
             ipc::send(
                 &mut stream,
