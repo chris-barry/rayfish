@@ -1375,26 +1375,26 @@ fn check_root() {
 /// and DNS. Linux only; elsewhere this is always false.
 #[cfg(target_os = "linux")]
 fn has_cap_net_admin() -> bool {
-    const CAP_NET_ADMIN: usize = 12;
-    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
-    unsafe {
-        let mut header = libc::__user_cap_header_struct {
-            version: LINUX_CAPABILITY_VERSION_3,
-            pid: 0,
-        };
-        let mut data = [libc::__user_cap_data_struct {
-            effective: 0,
-            permitted: 0,
-            inheritable: 0,
-        }; 2];
-        if libc::capget(&mut header, data.as_mut_ptr()) != 0 {
-            return false;
-        }
-        data[CAP_NET_ADMIN / 32].effective & (1 << (CAP_NET_ADMIN % 32)) != 0
-    }
+    const CAP_NET_ADMIN: u32 = 12;
+    // Read the effective capability set from /proc instead of calling
+    // capget(2): libc does not expose the __user_cap_* structs portably.
+    // CapEff uses one bit per capability, index 12 = CAP_NET_ADMIN.
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return false;
+    };
+    let Some(hex) = status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapEff:").map(str::trim))
+    else {
+        return false;
+    };
+    let Ok(effective) = u64::from_str_radix(hex, 16) else {
+        return false;
+    };
+    effective & (1 << CAP_NET_ADMIN) != 0
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn has_cap_net_admin() -> bool {
     false
 }
