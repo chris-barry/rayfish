@@ -1360,10 +1360,43 @@ fn check_root() {
     #[cfg(windows)]
     return;
     #[cfg(unix)]
-    if unsafe { libc::geteuid() } != 0 {
-        eprintln!("rayfish requires root privileges to create TUN devices. Run with sudo.");
-        std::process::exit(1);
+    if unsafe { libc::geteuid() } == 0 || has_cap_net_admin() {
+        return;
     }
+    eprintln!(
+        "rayfish needs root or CAP_NET_ADMIN to create TUN devices. Run with sudo, or use the systemd unit (which grants CAP_NET_ADMIN to a dynamic user)."
+    );
+    std::process::exit(1);
+}
+
+/// Whether this process holds CAP_NET_ADMIN — i.e. it is running under a
+/// unit like the bundled `rayfish.service`, which drops full root but keeps
+/// the network-administration capability the daemon needs for TUN, routes
+/// and DNS. Linux only; elsewhere this is always false.
+#[cfg(target_os = "linux")]
+fn has_cap_net_admin() -> bool {
+    const CAP_NET_ADMIN: usize = 12;
+    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+    unsafe {
+        let mut header = libc::__user_cap_header_struct {
+            version: LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
+        let mut data = [libc::__user_cap_data_struct {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
+        if libc::capget(&mut header, data.as_mut_ptr()) != 0 {
+            return false;
+        }
+        data[CAP_NET_ADMIN / 32].effective & (1 << (CAP_NET_ADMIN % 32)) != 0
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn has_cap_net_admin() -> bool {
+    false
 }
 
 /// Guards that must outlive the process: the file appender's `WorkerGuard`
