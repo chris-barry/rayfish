@@ -548,23 +548,26 @@ mod tests {
     }
 
     #[test]
-    fn quic_congestion_defaults_cubic_and_round_trips() {
+    fn quic_congestion_defaults_loss_tolerant_and_round_trips() {
         let mut cfg = AppConfig::default();
-        assert_eq!(render_global(&cfg, GlobalKey::QuicCongestion), "cubic");
-        apply_global(&mut cfg, GlobalKey::QuicCongestion, "loss-tolerant", false).unwrap();
-        assert_eq!(cfg.quic_congestion, QuicCongestion::LossTolerant);
         assert_eq!(
             render_global(&cfg, GlobalKey::QuicCongestion),
             "loss-tolerant"
         );
+        apply_global(&mut cfg, GlobalKey::QuicCongestion, "cubic", false).unwrap();
+        assert_eq!(cfg.quic_congestion, QuicCongestion::Cubic);
+        assert_eq!(render_global(&cfg, GlobalKey::QuicCongestion), "cubic");
+        apply_global(&mut cfg, GlobalKey::QuicCongestion, "loss-tolerant", false).unwrap();
+        assert_eq!(cfg.quic_congestion, QuicCongestion::LossTolerant);
+        apply_global(&mut cfg, GlobalKey::QuicCongestion, "cubic", false).unwrap();
         // bbr3 was offered once and removed; it must not come back as a value.
         for value in ["bbr3", "reno", "on", "LossTolerant"] {
             let err = apply_global(&mut cfg, GlobalKey::QuicCongestion, value, false);
             assert!(err.is_err(), "{value} must be rejected");
         }
-        assert_eq!(cfg.quic_congestion, QuicCongestion::LossTolerant);
-        apply_global(&mut cfg, GlobalKey::QuicCongestion, "", false).unwrap();
         assert_eq!(cfg.quic_congestion, QuicCongestion::Cubic);
+        apply_global(&mut cfg, GlobalKey::QuicCongestion, "", false).unwrap();
+        assert_eq!(cfg.quic_congestion, QuicCongestion::LossTolerant);
     }
 
     #[test]

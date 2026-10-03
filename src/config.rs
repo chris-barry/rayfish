@@ -57,10 +57,10 @@ impl DnsMode {
 #[strum(serialize_all = "kebab-case")]
 pub enum QuicCongestion {
     /// noq's default.
-    #[default]
     Cubic,
     /// Ignores ordinary loss and leaves rate control to the tunnelled flows.
     /// Experimental.
+    #[default]
     LossTolerant,
 }
 
@@ -72,7 +72,7 @@ fn deserialize_quic_congestion<'de, D: Deserializer<'de>>(
 ) -> Result<QuicCongestion, D::Error> {
     let value = String::deserialize(deserializer)?;
     Ok(value.trim().parse().unwrap_or_else(|_| {
-        tracing::warn!(%value, "unknown quic_congestion in settings.toml; using cubic");
+        tracing::warn!(%value, "unknown quic_congestion in settings.toml; using default controller");
         QuicCongestion::default()
     }))
 }
@@ -2513,25 +2513,37 @@ name = "test"
 
     #[test]
     fn quic_congestion_round_trips_and_tolerates_unknown_values() {
+        use std::fs::write;
+
         let tmp = tempfile::tempdir().expect("create config directory");
         let path = tmp.path().join(SETTINGS_FILE);
         assert_eq!(
             load_in(tmp.path()).expect("fresh install").quic_congestion,
-            QuicCongestion::Cubic
+            QuicCongestion::LossTolerant
         );
-        std::fs::write(&path, "quic_congestion = 'loss-tolerant'\n").expect("write setting");
-        let loaded = load_in(tmp.path()).expect("load setting");
-        assert_eq!(loaded.quic_congestion, QuicCongestion::LossTolerant);
-        assert!(
-            settings_toml(&loaded)
-                .expect("serialize")
-                .contains("quic_congestion = \"loss-tolerant\"")
+        write(&path, "").expect("write settings without a controller");
+        assert_eq!(
+            load_in(tmp.path())
+                .expect("load unset controller")
+                .quic_congestion,
+            QuicCongestion::LossTolerant
         );
+        for controller in [QuicCongestion::Cubic, QuicCongestion::LossTolerant] {
+            let value = controller.as_ref();
+            write(&path, format!("quic_congestion = '{value}'\n")).expect("write setting");
+            let loaded = load_in(tmp.path()).expect("load setting");
+            assert_eq!(loaded.quic_congestion, controller);
+            assert!(
+                settings_toml(&loaded)
+                    .expect("serialize")
+                    .contains(&format!("quic_congestion = \"{value}\""))
+            );
+        }
         // A removed or hand-typed controller must not stop the daemon loading.
-        std::fs::write(&path, "quic_congestion = 'bbr3'\n").expect("write unknown");
+        write(&path, "quic_congestion = 'bbr3'\n").expect("write unknown");
         assert_eq!(
             load_in(tmp.path()).expect("load unknown").quic_congestion,
-            QuicCongestion::Cubic
+            QuicCongestion::LossTolerant
         );
     }
 
