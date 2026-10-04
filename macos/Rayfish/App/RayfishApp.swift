@@ -589,7 +589,7 @@ private struct SettingsView: View {
     let updater: SPUUpdater?
     @State private var shellCommandMessage: String?
     @State private var automaticUpdatesEnabled = false
-    @State private var congestionNeedsReconnect = false
+    @State private var engineNeedsReconnect = false
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Settings").font(RayfishTheme.heading()).foregroundColor(RayfishTheme.ink)
@@ -686,27 +686,32 @@ private struct SettingsView: View {
             .padding(18).rayfishCard()
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Text("Loss-tolerant congestion control")
+                    Text("QUIC engine")
                     Spacer()
-                    Toggle("Loss-tolerant congestion control", isOn: Binding(
-                        get: { controller.status?.quicLossTolerant ?? false },
+                    Picker("QUIC engine", selection: Binding(
+                        get: { controller.status?.quicFqCodel ?? false },
                         set: { enabled in
                             Task {
-                                await controller.setSetting(.quicLossTolerant, enabled: enabled)
-                                congestionNeedsReconnect = controller.error == nil
+                                await controller.setSetting(.quicFqCodel, enabled: enabled)
+                                engineNeedsReconnect = controller.error == nil
                             }
                         }
-                    ))
+                    )) {
+                        Text("Standalone").tag(false)
+                        Text("FQ-CoDel").tag(true)
+                    }
                     .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 150)
                 }
-                Text("Experimental. Keeps throughput up on lossy links instead of slowing down on every lost packet.")
+                Text("Standalone sends packets directly. FQ-CoDel is experimental and gives small transfers a turn alongside bulk traffic.")
                     .foregroundColor(RayfishTheme.muted)
-                if congestionNeedsReconnect {
+                if engineNeedsReconnect {
                     HStack {
                         Text("Reconnect to apply this change.").foregroundColor(RayfishTheme.amber)
                         Spacer()
                         Button("Reconnect now") {
-                            congestionNeedsReconnect = false
+                            engineNeedsReconnect = false
                             Task { await controller.reconnect() }
                         }
                     }

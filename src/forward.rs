@@ -5,6 +5,7 @@
 //! - [`spawn_peer_reader`]: one per peer, reads incoming datagrams and forwards to TUN writer
 //! - [`spawn_tun_writer`]: single task, writes incoming packets to the TUN device
 
+pub(crate) mod fq_codel;
 mod fragment;
 mod lazy_dial;
 
@@ -215,19 +216,30 @@ pub(crate) enum InboundDecision {
     DropExit,
 }
 
+struct InboundPeer<'a> {
+    identity: &'a EndpointId,
+    ipv6: Ipv6Addr,
+    network: &'a str,
+    shares_network: &'a dyn Fn(&str) -> bool,
+}
+
 /// Pure evaluation of an inbound peer datagram against the firewall and basic
 /// packet validity. Extracted from [`spawn_peer_reader`] so it can be unit-tested.
 ///
 /// Non-IP / truncated / oversized packets are rejected (`DropMalformed`) rather
 /// than passed through: previously such packets bypassed the firewall entirely.
-pub(crate) fn evaluate_inbound(
+fn evaluate_inbound(
     packet: &[u8],
     firewall: &SharedFirewall,
     exit: &ExitContext,
-    peer_id: &EndpointId,
-    peer_ipv6: Ipv6Addr,
-    network: &str,
+    peer: InboundPeer<'_>,
 ) -> InboundDecision {
+    let InboundPeer {
+        identity: peer_id,
+        ipv6: peer_ipv6,
+        network,
+        shares_network,
+    } = peer;
     if packet.len() > fragment::MAX_PACKET {
         return InboundDecision::DropMalformed;
     }
@@ -308,7 +320,7 @@ pub(crate) fn evaluate_inbound(
         };
     }
     if firewall
-        .evaluate_packet(Direction::In, &info, peer_id, Some(network))
+        .evaluate_packet(Direction::In, &info, peer_id, shares_network)
         .is_deny()
     {
         return InboundDecision::DropFirewall(info);
@@ -504,7 +516,7 @@ impl<R: crate::tun::TunRead> MeshForwarder<R> {
                 Some((peer, connected)) = done_rx.recv() => {
                     in_flight.remove(&peer);
                     let pkts = buffered.take(&peer);
-                    let ctx = SendCtx { firewall: &firewall, stats: &stats, tun_tx: &tun_tx };
+                    let ctx = SendCtx { firewall: &firewall, peers: &peers, stats: &stats, tun_tx: &tun_tx };
                     flush_or_drop(&peers, &ctx, &exit_client, connected, pkts).await;
                     continue;
                 }
@@ -594,6 +606,7 @@ impl<R: crate::tun::TunRead> MeshForwarder<R> {
             };
             let ctx = SendCtx {
                 firewall: &firewall,
+                peers: &peers,
                 stats: &stats,
                 tun_tx: &tun_tx,
             };
@@ -673,12 +686,12 @@ async fn flush_or_drop(
     }
 }
 
-/// The three pieces of forwarding state every outbound send needs: the firewall
-/// that admits the packet, the counters it is recorded in, and the TUN writer a
-/// reject or PMTU reply is injected back into.
+/// Forwarding state for outbound admission, membership checks, counters, and
+/// injecting reject or PMTU replies into the TUN.
 pub(crate) struct SendCtx<'a> {
     pub firewall: &'a SharedFirewall,
-    pub stats: &'a ForwardMetrics,
+    pub peers: &'a PeerTable,
+    pub stats: &'a Arc<ForwardMetrics>,
     pub tun_tx: &'a mpsc::Sender<Bytes>,
 }
 
@@ -697,12 +710,9 @@ async fn prepare_datagrams(
     // per-host firewall is the fine-grained gate.
     if ctx
         .firewall
-        .evaluate_packet(
-            Direction::Out,
-            info,
-            &route.endpoint_id,
-            Some(&route.network),
-        )
+        .evaluate_packet(Direction::Out, info, &route.endpoint_id, |network| {
+            ctx.peers.shares_network_v6(&route.ipv6, network)
+        })
         .is_deny()
     {
         tracing::debug!(dst = %info.dst_ip, port = info.dst_port, "firewall denied outbound");
@@ -757,8 +767,8 @@ async fn prepare_datagrams(
         pkt
     };
     // Prefix the network handle so the receiver, which shares one connection for all
-    // our networks, can recover which network this datagram belongs to (firewall
-    // scoping + reachability). `handle == 0` means we have no handle for the routed
+    // our networks, can recover which network this datagram belongs to for
+    // reachability and exit routing. `handle == 0` means we have no handle for the routed
     // network yet (the peer hasn't been announced) — drop rather than send an
     // undecodable datagram.
     if route.handle == 0 {
@@ -785,8 +795,13 @@ pub(crate) async fn send_over_route(
     let Some(encoded) = prepare_datagrams(ctx, route, info, pkt).await else {
         return;
     };
-    let datagrams = encoded.datagrams();
-    send_batch(ctx, route, datagrams, &[(datagrams.len(), n)]);
+    if let Some(slot) = &route.scheduler {
+        let sender = slot.get_or_init(|| fq_codel::Sender::spawn(route, Arc::clone(ctx.stats)));
+        sender.enqueue(info, route.handle, encoded, n);
+    } else {
+        let datagrams = encoded.datagrams();
+        send_batch(ctx, route, datagrams, &[(datagrams.len(), n)]);
+    }
 }
 
 /// Hands an ordered run of datagrams to noq. `packets` records the end index and
@@ -935,8 +950,13 @@ pub fn spawn_peer_reader(
                 };
 
                 let peer_user = device_user_map.resolve(&peer_id);
-                match evaluate_inbound(&datagram, &firewall, &exit, &peer_user, peer_ipv6, &network)
-                {
+                let peer = InboundPeer {
+                    identity: &peer_user,
+                    ipv6: peer_ipv6,
+                    network: &network,
+                    shares_network: &|name| peers.shares_network_v6(&peer_ipv6, name),
+                };
+                match evaluate_inbound(&datagram, &firewall, &exit, peer) {
                     InboundDecision::Accept => {
                         // The TUN can be replaced with a smaller one while this
                         // connection stays open. Guard in-flight packets too,
@@ -1090,9 +1110,31 @@ pub fn spawn_tun_writer<W: crate::tun::TunWrite>(
 mod tests {
     use super::*;
     use crate::AsyncMutex;
+    use crate::config::QuicEngine;
     use crate::firewall::Action;
     use iroh::SecretKey;
     use smol_str::SmolStr;
+
+    fn evaluate_inbound(
+        packet: &[u8],
+        firewall: &SharedFirewall,
+        exit: &ExitContext,
+        identity: &EndpointId,
+        ipv6: Ipv6Addr,
+        network: &str,
+    ) -> InboundDecision {
+        super::evaluate_inbound(
+            packet,
+            firewall,
+            exit,
+            InboundPeer {
+                identity,
+                ipv6,
+                network,
+                shares_network: &|name| name == network,
+            },
+        )
+    }
 
     #[test]
     fn remote_ping_replies_are_not_android_wake_signals() {
@@ -1122,12 +1164,17 @@ mod tests {
 
     #[tokio::test]
     async fn fragmented_tcp_crosses_small_quic_path_and_keeps_policy_checks() {
-        check_fragmented_tcp(1280).await;
+        check_fragmented_tcp(1280, QuicEngine::Standalone).await;
     }
 
     #[tokio::test]
     async fn full_tun_mtu_crosses_small_quic_path_and_keeps_policy_checks() {
-        check_fragmented_tcp(crate::tun::TUN_MTU as usize).await;
+        check_fragmented_tcp(crate::tun::TUN_MTU as usize, QuicEngine::Standalone).await;
+    }
+
+    #[tokio::test]
+    async fn fq_codel_preserves_fragmentation_firewall_and_lazy_dial_flush() {
+        check_fragmented_tcp(crate::tun::TUN_MTU as usize, QuicEngine::FqCodel).await;
     }
 
     #[tokio::test]
@@ -1170,9 +1217,10 @@ mod tests {
         let route = peers.lookup_v6(&b_ip).unwrap();
         let (feedback_tx, mut feedback_rx) = mpsc::channel(4);
         let fw = inbound_fw(Action::Allow, vec![]);
-        let stats = ForwardMetrics::default();
+        let stats = Arc::new(ForwardMetrics::default());
         let ctx = SendCtx {
             firewall: &fw,
+            peers: &peers,
             stats: &stats,
             tun_tx: &feedback_tx,
         };
@@ -1203,19 +1251,20 @@ mod tests {
     /// Exercise the production sender, lazy-dial batch flush and receiver over
     /// real QUIC, with discovery disabled so full IP packets need fragmentation
     /// even on loopback.
-    async fn check_fragmented_tcp(packet_len: usize) {
+    async fn check_fragmented_tcp(packet_len: usize, cc: QuicEngine) {
         use iroh::endpoint::{QuicTransportConfig, presets};
         use iroh::{Endpoint, RelayMode};
         use std::time::{Duration, Instant};
         use tokio::time::timeout;
 
-        async fn endpoint() -> Endpoint {
+        async fn endpoint(cc: QuicEngine) -> Endpoint {
             Endpoint::builder(presets::N0)
                 .alpns(vec![crate::transport::mesh_alpn()])
                 .relay_mode(RelayMode::Disabled)
                 .transport_config(
                     QuicTransportConfig::builder()
                         .initial_mtu(1200)
+                        .datagram_send_buffer_size(crate::transport::datagram_send_buffer_size(cc))
                         .mtu_discovery_config(None)
                         .build(),
                 )
@@ -1223,8 +1272,8 @@ mod tests {
                 .await
                 .unwrap()
         }
-        let a = endpoint().await;
-        let b = endpoint().await;
+        let a = endpoint(cc).await;
+        let b = endpoint(cc).await;
         let connect = async {
             let alpn = crate::transport::mesh_alpn();
             let (send, recv) = tokio::join!(a.connect(b.addr(), &alpn), async {
@@ -1236,7 +1285,7 @@ mod tests {
         assert!(send.max_datagram_size().unwrap() < 1282);
         let a_ip = crate::membership::derive_ipv6(&a.id());
         let b_ip = crate::membership::derive_ipv6(&b.id());
-        let sender_peers = PeerTable::new();
+        let sender_peers = PeerTable::new().with_engine(cc);
         sender_peers.add(b_ip, send.clone(), b.id(), "test");
         sender_peers.note_receive_mtu(&b.id(), &send, crate::tun::TUN_MTU);
         let receiver_peers = PeerTable::new();
@@ -1248,10 +1297,21 @@ mod tests {
         let (feedback_tx, mut feedback_rx) = mpsc::channel(16);
         let stats = Arc::new(ForwardMetrics::default());
         let send_stats = Arc::new(ForwardMetrics::default());
-        let firewall = inbound_fw(Action::Allow, vec![]);
+        receiver_peers.add(a_ip, recv.clone(), a.id(), "z-allowed");
+        sender_peers.add(b_ip, send.clone(), b.id(), "z-allowed");
+        let rule = firewall::FirewallRule {
+            direction: Direction::In,
+            action: Action::Allow,
+            protocol: firewall::Protocol::Any,
+            port: None,
+            peer: firewall::PeerFilter::Identity(a.id()),
+            network: Some("z-allowed".to_string()),
+            origin: firewall::RuleOrigin::Local,
+        };
+        let firewall = inbound_fw(Action::Deny, vec![rule.clone()]);
         let token = CancellationToken::new();
         let reader = spawn_peer_reader(
-            recv,
+            recv.clone(),
             a.id(),
             receiver_peers.clone(),
             ForwardCtx {
@@ -1263,13 +1323,27 @@ mod tests {
                 exit: no_exit(),
             },
         );
-        let sender_fw = inbound_fw(Action::Allow, vec![]);
+        let sender_fw = SharedFirewall::new(firewall::FirewallConfig {
+            default_inbound: Action::Deny,
+            default_outbound: Action::Deny,
+            rules: vec![firewall::FirewallRule {
+                direction: Direction::Out,
+                peer: firewall::PeerFilter::Identity(b.id()),
+                ..rule
+            }],
+            ..Default::default()
+        });
         let ctx = SendCtx {
             firewall: &sender_fw,
+            peers: &sender_peers,
             stats: &send_stats,
             tun_tx: &feedback_tx,
         };
         let route = sender_peers.lookup_v6(&b_ip).unwrap();
+        assert_eq!(
+            route.network, "test",
+            "transport uses a different network than the rule"
+        );
         let mut packet = make_tcp_packet_between(a_ip, b_ip, 22);
         packet.resize(packet_len, 0x5a);
         packet[4..6].copy_from_slice(&((packet_len - 40) as u16).to_be_bytes());
@@ -1318,6 +1392,27 @@ mod tests {
         assert_eq!(received.packets_rx, 4);
         assert_eq!(sent.bytes_tx, (packet.len() * 2 + small.len() * 2) as u64);
         assert_eq!(received.bytes_rx, sent.bytes_tx);
+
+        // A cached route must not keep an allow rule effective after membership
+        // ends. The transport network still exists at both ends.
+        sender_peers.remove_peer_from_network(&b_ip, "z-allowed");
+        assert!(
+            prepare_datagrams(&ctx, &route, &info, packet.clone())
+                .await
+                .is_none()
+        );
+        sender_peers.add(b_ip, send.clone(), b.id(), "z-allowed");
+        receiver_peers.remove_peer_from_network(&a_ip, "z-allowed");
+        send_over_route(&ctx, &route, &info, packet.clone()).await;
+        timeout(Duration::from_secs(5), async {
+            while stats.drop_count(DropReason::Firewall) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(tun_rx.try_recv().is_err());
+        receiver_peers.add(a_ip, recv.clone(), a.id(), "z-allowed");
 
         if packet_len > usize::from(crate::tun::MIN_TUN_MTU) {
             // A smaller receive limit takes effect even on an already-cached
@@ -2147,7 +2242,7 @@ mod tests {
         p[43] = 0xbb; // dst port 443
         let info = firewall::parse_packet_info(&p).unwrap();
         assert!(
-            fw.evaluate_packet(Direction::Out, &info, peer, Some("test-net"))
+            fw.evaluate_packet(Direction::Out, &info, peer, |name| name == "test-net")
                 .is_allow()
         );
     }
