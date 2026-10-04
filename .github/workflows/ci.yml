@@ -98,7 +98,16 @@ jobs:
           ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/id_ed25519
 
       - name: Build E2E node Docker image
-        run: docker build -t rayfish-e2e-node tests/docker
+        run: |
+          for attempt in 1 2 3; do
+            if docker build -t rayfish-e2e-node tests/docker; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
 
       - name: "E2E: closed-net"
         run: bash tests/e2e.sh closed-net run
