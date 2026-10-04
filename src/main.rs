@@ -1360,7 +1360,7 @@ fn check_root() {
     #[cfg(windows)]
     return;
     #[cfg(unix)]
-    if unsafe { libc::geteuid() } == 0 || has_cap_net_admin() {
+    if uzers::get_effective_uid() == 0 || has_cap_net_admin() {
         return;
     }
     eprintln!(
