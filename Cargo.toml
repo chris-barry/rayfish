@@ -20,6 +20,9 @@ members = ["ray-proto", "ray-mobile", "ray-apple", "ray-windows"]
 [workspace.metadata.release]
 publish = false
 
+[package.metadata.release]
+pre-release-hook = ["python3", "scripts/update-release-versions.py", "{{version}}"]
+
 # Strip debug symbols from release builds. This is what shrinks the Android
 # release .so from hundreds of MiB down to tens of MiB. Do not add
 # `panic = "abort"` here: UniFFI's generated bindings need `panic = "unwind"`
