@@ -24,6 +24,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Failed file downloads stay in `ray files` for retry with `ray files accept <id>`,
+  reusing data already downloaded. Android offers Retry on Home and in notifications.
+
 - SSH to your own mesh address permits your local account without a password.
   Root may select any account; mesh SSH grants do not apply to local callers.
 

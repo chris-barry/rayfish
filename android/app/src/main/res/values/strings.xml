@@ -295,6 +295,7 @@
     <string name="file_transfer_bytes">%1$s of %2$s</string>
     <string name="error_status_refresh">Could not refresh. Showing the last known status.</string>
     <string name="action_retry">Retry</string>
+    <string name="notif_offer_retry_text">Download interrupted. Retry from %1$s (%2$s).</string>
     <string name="quic_engine_title">QUIC engine</string>
     <string name="quic_engine_standalone">Standalone</string>
     <string name="quic_engine_fq_codel">FQ-CoDel (experimental)</string>

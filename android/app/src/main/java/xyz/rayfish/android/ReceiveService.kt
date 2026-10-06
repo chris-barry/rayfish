@@ -94,11 +94,8 @@ class ReceiveService : Service() {
                 if (accepting) accept(offerId, filename, peer, size, mime) else reject(offerId, filename)
             } catch (t: Throwable) {
                 Log.e(TAG, "receive action $action for $filename failed", t)
-                // A failed accept still consumed the offer core-side, but a failed
-                // reject did not: let the next poll put the notification back
-                // rather than suppressing an offer that is still sitting there
-                // with no way left to answer it.
-                OfferNotifier.clearActedOn(offerId)
+                if (accepting) OfferNotifier.markFailed(applicationContext, offerId)
+                else OfferNotifier.clearActedOn(offerId)
             } finally {
                 // Only the last one out tears anything down. startForeground and
                 // stopForeground are service-wide, not per start command, so a

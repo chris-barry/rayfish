@@ -133,6 +133,7 @@ fun HomeScreen(snapshot: AppSnapshot, starting: Boolean, onToast: (String) -> Un
     // The foreground service owns downloads, including their move to Downloads.
     // Observing its state keeps Save disabled across tab changes and recreation.
     val accepting by ReceiveService.accepting.collectAsStateWithLifecycle()
+    val retryable by OfferNotifier.retryable.collectAsStateWithLifecycle()
     fun acceptFile(f: FileOffer) {
         if (!ReceiveService.startAccept(context, f)) {
             onToast(context.getString(R.string.error_receive_start))
@@ -171,7 +172,9 @@ fun HomeScreen(snapshot: AppSnapshot, starting: Boolean, onToast: (String) -> Un
                         NotifRow(
                             title = f.filename,
                             subtitle = stringResource(R.string.home_file_from, formatSize(f.size), f.from),
-                            acceptLabel = stringResource(R.string.action_save), onAccept = { acceptFile(f) },
+                            acceptLabel = stringResource(
+                                if (f.id in retryable) R.string.action_retry else R.string.action_save,
+                            ), onAccept = { acceptFile(f) },
                             onReject = {
                                 OfferNotifier.markActedOn(context, f.id)
                                 act(onFailure = { OfferNotifier.clearActedOn(f.id) }) {
