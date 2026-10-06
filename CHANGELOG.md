@@ -24,6 +24,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- SSH to your own mesh address permits your local account without a password.
+  Root may select any account; mesh SSH grants do not apply to local callers.
+
 - Peer send queue metrics include the FQ-CoDel backlog and use the selected
   engine's QUIC buffer size.
 

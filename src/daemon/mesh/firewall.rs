@@ -549,6 +549,11 @@ impl Daemon {
             tracing::warn!(error = %e, "failed to persist firewall config");
         }
         crate::forward::set_ssh_nat_port(app_config.ssh_port);
+        #[cfg(feature = "desktop")]
+        if self.active.load(Ordering::SeqCst) && app_config.ssh_enabled {
+            self.stop_ssh();
+            self.start_ssh();
+        }
         #[cfg(all(target_os = "macos", feature = "desktop"))]
         if self.active.load(Ordering::SeqCst)
             && self.app_ssh_helper.load(Ordering::SeqCst)

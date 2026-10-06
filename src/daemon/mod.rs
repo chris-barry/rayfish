@@ -1031,9 +1031,11 @@ impl Daemon {
             // Present on every node so any peer stays reachable-on-demand after a link
             // idle-closes.
             let dialer = Some(Arc::clone(&self.registry));
+            let local_ipv6 = self.transport.identity.local_ipv6();
             tokio::spawn(async move {
                 if let Err(e) = (forward::MeshForwarder {
                     tun: reader,
+                    local_ipv6,
                     peers,
                     firewall,
                     token: cancel,

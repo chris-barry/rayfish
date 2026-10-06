@@ -462,6 +462,7 @@ pub(crate) fn is_magic_dns(info: &firewall::PacketInfo) -> bool {
 /// The inputs and shared handles for one TUN forwarding loop.
 pub(crate) struct MeshForwarder<R> {
     pub tun: R,
+    pub local_ipv6: Ipv6Addr,
     pub peers: PeerTable,
     pub firewall: SharedFirewall,
     pub token: CancellationToken,
@@ -487,6 +488,7 @@ impl<R: crate::tun::TunRead> MeshForwarder<R> {
     pub(crate) async fn run(self) -> Result<()> {
         let Self {
             mut tun,
+            local_ipv6,
             peers,
             firewall,
             token,
@@ -535,6 +537,18 @@ impl<R: crate::tun::TunRead> MeshForwarder<R> {
                 stats.record_drop(DropReason::Malformed);
                 continue;
             };
+            // OS-owned tunnels can route self-traffic through their packet flow.
+            // Deliver it unchanged so the local SSH listener can identify the
+            // client socket. It has no remote peer or mesh SSH port translation.
+            if info.src_ip == IpAddr::V6(local_ipv6) && info.dst_ip == IpAddr::V6(local_ipv6) {
+                tokio::select! {
+                    _ = token.cancelled() => return Ok(()),
+                    result = tun_tx.send(pkt) => {
+                        result.map_err(|_| anyhow::anyhow!("TUN writer stopped"))?;
+                    }
+                }
+                continue;
+            }
             // Android keeps the TUN, DNS, and file relay alive while mesh links
             // are idle. A kernel echo reply to a remote ping is not local demand.
             #[cfg(target_os = "android")]
@@ -1114,6 +1128,60 @@ mod tests {
     use crate::firewall::Action;
     use iroh::SecretKey;
     use smol_str::SmolStr;
+
+    #[tokio::test]
+    async fn self_packets_return_to_tun_without_ssh_translation_or_a_peer() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        struct Reader(mpsc::Receiver<Bytes>);
+        impl crate::tun::TunRead for Reader {
+            async fn read_packet(&mut self) -> Result<Bytes> {
+                self.0
+                    .recv()
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("test reader closed"))
+            }
+        }
+        let local_ipv6 = "200::1".parse().expect("local mesh address");
+        let other = "200::2".parse().expect("other mesh address");
+        let packet = Bytes::from(make_tcp_packet_between(local_ipv6, local_ipv6, SSH_PORT));
+        let remote = Bytes::from(make_tcp_packet_between(local_ipv6, other, SSH_PORT));
+        let (input, reader) = mpsc::channel(4);
+        let (tun_tx, mut output) = mpsc::channel(4);
+        let token = CancellationToken::new();
+        let forwarder = MeshForwarder {
+            tun: Reader(reader),
+            local_ipv6,
+            peers: PeerTable::default(),
+            firewall: SharedFirewall::new(firewall::FirewallConfig::default()),
+            token: token.clone(),
+            stats: Arc::new(ForwardMetrics::default()),
+            resolver: Arc::new(dns::resolver::Resolver::new(
+                dns::HostnameTable::default(),
+                dns::ReverseLookupTable::default(),
+            )),
+            tun_tx,
+            dialer: None,
+        };
+        let task = tokio::spawn(forwarder.run());
+        input.send(remote).await.expect("send remote packet");
+        input.send(packet.clone()).await.expect("send self packet");
+        assert_eq!(
+            timeout(Duration::from_secs(1), output.recv())
+                .await
+                .expect("self packet delivered"),
+            Some(packet)
+        );
+        assert!(
+            output.try_recv().is_err(),
+            "remote packet must not loop back"
+        );
+        token.cancel();
+        task.await
+            .expect("forwarder task")
+            .expect("forwarder stops cleanly");
+    }
 
     fn evaluate_inbound(
         packet: &[u8],

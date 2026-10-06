@@ -82,9 +82,7 @@ impl DisplayOut for SshStateOutput<'_> {
             println!("Start the server with `ray ssh on`.");
             return;
         }
-        // Self-traffic uses loopback, so it bypasses the TUN's port rewrite.
-        println!("\nThis node cannot mesh-SSH to itself; `ssh <this node>` is refused.");
-        println!("Use `ssh localhost` on the box itself.");
+        println!("\nSelf-SSH permits your local account; root may select any account.");
     }
 }
 
