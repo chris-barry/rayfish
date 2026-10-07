@@ -512,6 +512,8 @@ impl FileService {
         output: Option<String>,
         peer_cred: Option<(u32, u32)>,
     ) -> IpcMessage {
+        #[cfg(windows)]
+        let _ = peer_cred;
         let blob_hash = iroh_blobs::Hash::from_bytes(*pending_file.blob_hash.as_bytes());
         let peer_label = pending_file.from.fmt_short().to_string();
         let transfer_id = self.transfers.register_receive(
