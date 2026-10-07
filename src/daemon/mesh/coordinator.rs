@@ -450,7 +450,7 @@ impl NetworkRegistry {
                 } else {
                     self.peers.clear_incompatible(&peer_id);
                 }
-                tracing::debug!(peer = %peer_id.fmt_short(), error = %e, "dial attempt failed");
+                tracing::debug!(peer = %peer_id.fmt_short(), error = %format!("{e:#}"), "dial attempt failed");
                 self.reachability.note_fail(peer_id);
                 return false;
             }
