@@ -1360,10 +1360,43 @@ fn check_root() {
     #[cfg(windows)]
     return;
     #[cfg(unix)]
-    if unsafe { libc::geteuid() } != 0 {
-        eprintln!("rayfish requires root privileges to create TUN devices. Run with sudo.");
-        std::process::exit(1);
+    if uzers::get_effective_uid() == 0 || has_cap_net_admin() {
+        return;
     }
+    eprintln!(
+        "rayfish needs root or CAP_NET_ADMIN to create TUN devices. Run with sudo, or use the systemd unit (which grants CAP_NET_ADMIN to a dynamic user)."
+    );
+    std::process::exit(1);
+}
+
+/// Whether this process holds CAP_NET_ADMIN — i.e. it is running under a
+/// unit like the bundled `rayfish.service`, which drops full root but keeps
+/// the network-administration capability the daemon needs for TUN, routes
+/// and DNS. Linux only; elsewhere this is always false.
+#[cfg(target_os = "linux")]
+fn has_cap_net_admin() -> bool {
+    const CAP_NET_ADMIN: u32 = 12;
+    // Read the effective capability set from /proc instead of calling
+    // capget(2): libc does not expose the __user_cap_* structs portably.
+    // CapEff uses one bit per capability, index 12 = CAP_NET_ADMIN.
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return false;
+    };
+    let Some(hex) = status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapEff:").map(str::trim))
+    else {
+        return false;
+    };
+    let Ok(effective) = u64::from_str_radix(hex, 16) else {
+        return false;
+    };
+    effective & (1 << CAP_NET_ADMIN) != 0
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn has_cap_net_admin() -> bool {
+    false
 }
 
 /// Guards that must outlive the process: the file appender's `WorkerGuard`
