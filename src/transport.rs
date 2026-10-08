@@ -167,18 +167,45 @@ fn control_plane_nameservers(o: &ServerOverride, system: Option<Vec<Ipv4Addr>>) 
     // Both families survive: an IPv6-only host must not lose the operator's v6
     // upstreams to fit an IPv4-typed helper, and the resolver dials each entry
     // per its own family, so a v4 entry simply fails to connect there.
-    let mut out: Vec<IpAddr> = crate::config::resolve_upstreams(o, system.unwrap_or_default());
+    let system = system.unwrap_or_default();
+    let mut out: Vec<IpAddr> = crate::config::resolve_upstreams(o, system.clone());
     if !o.replace {
         out.extend(PUBLIC_FALLBACK_DNS.into_iter().map(IpAddr::V4));
         out.extend(PUBLIC_FALLBACK_DNS_V6.into_iter().map(IpAddr::V6));
     }
+    // Filter overlay IPs and CGNAT from operator-configured and public fallback
+    // resolvers. System resolvers are kept as a fallback if filtering would
+    // leave us with nothing: a host whose only nameservers are in the mesh range
+    // still needs *some* resolver, and pointing the control plane at the mesh is
+    // better than having no resolver at all.
     let mut seen = std::collections::HashSet::new();
-    out.retain(|ip| {
-        !matches!(ip, IpAddr::V4(v4) if crate::membership::is_cgnat_range(*v4))
-            && seen.insert(*ip)
-    });
-    out.truncate(MAX_CONTROL_PLANE_NAMESERVERS);
-    out
+    let mut filtered: Vec<IpAddr> = out
+        .iter()
+        .filter(|ip| {
+            let is_system = system.contains(&match ip {
+                IpAddr::V4(v4) => *v4,
+                IpAddr::V6(_) => return true, // system is v4 only
+            });
+            !is_system
+                && !crate::membership::is_overlay_ip(**ip)
+                && !matches!(ip, IpAddr::V4(v4) if crate::membership::is_cgnat_range(*v4))
+                && seen.insert(**ip)
+        })
+        .copied()
+        .collect();
+    // If filtering removed everything, fall back to the raw system resolvers
+    // (deduped only). This keeps the control plane working even on a host
+    // whose only configured nameservers happen to be in the mesh range.
+    if filtered.is_empty() && !system.is_empty() {
+        seen.clear();
+        filtered = system
+            .into_iter()
+            .map(IpAddr::V4)
+            .filter(|ip| seen.insert(*ip))
+            .collect();
+    }
+    filtered.truncate(MAX_CONTROL_PLANE_NAMESERVERS);
+    filtered
 }
 
 /// Creates an iroh endpoint with the N0 preset (NAT traversal + relay fallback).
@@ -703,13 +730,48 @@ mod tests {
     /// in place waits on the data plane it is trying to bring up.
     #[test]
     fn control_plane_never_points_at_an_overlay_resolver() {
-        let magic = crate::dns::MAGIC_DNS_V4;
+        let magic_v4 = crate::dns::MAGIC_DNS_V4;
         let tailnet: Ipv4Addr = "100.100.100.100".parse().unwrap();
-        let got = control_plane_nameservers(&ServerOverride::default(), Some(vec![magic, tailnet]));
-        assert!(!got.contains(&IpAddr::V4(magic)));
+        // system nameservers are IPv4 only; test v4 overlay filtering here
+        let got = control_plane_nameservers(
+            &ServerOverride::default(),
+            Some(vec![magic_v4, tailnet]),
+        );
+        assert!(!got.contains(&IpAddr::V4(magic_v4)));
         assert!(!got.contains(&IpAddr::V4(tailnet)));
         // And it still has somewhere to ask.
         assert!(!got.is_empty());
+    }
+
+    /// The operator's configured IPv6 upstreams (in `o.servers`) also have
+    /// mesh overlay addresses filtered out.
+    #[test]
+    fn control_plane_filters_operator_mesh_ipv6() {
+        let mesh_v6: Ipv6Addr = "200::1".parse().unwrap();
+        let o = ServerOverride {
+            servers: vec![mesh_v6.to_string(), "1.1.1.1".to_string()],
+            replace: false,
+        };
+        let got = control_plane_nameservers(&o, Some(vec![]));
+        assert!(!got.contains(&IpAddr::V6(mesh_v6)));
+        assert!(got.contains(&IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
+    }
+
+    /// If filtering removes all resolvers, fall back to the raw system
+    /// resolvers (deduped). This keeps the control plane working even when
+    /// the host's only nameservers are in the mesh range.
+    #[test]
+    fn control_plane_falls_back_to_system_when_filtering_removes_all() {
+        let magic_v4 = crate::dns::MAGIC_DNS_V4;
+        // Only mesh overlay addresses in system resolvers, no operator
+        // servers, no public fallback (replace=true).
+        let o = ServerOverride {
+            servers: vec![],
+            replace: true,
+        };
+        let got = control_plane_nameservers(&o, Some(vec![magic_v4]));
+        // Should fall back to the system resolver even though it's an overlay address
+        assert_eq!(got, vec![IpAddr::V4(magic_v4)]);
     }
 
     #[test]
