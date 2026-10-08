@@ -8,13 +8,10 @@
 //! below what the path carries, and the overflow is dropped from the datagram
 //! send buffer.
 //!
-//! The controller is the `quic-congestion` setting
-//! ([`QuicCongestion`]), read once at bind:
-//!
-//! - `cubic`: noq's default controller, available as an explicit choice.
-//! - `loss-tolerant` (default): [`LossTolerant`], which ignores ordinary loss
-//!   and leaves rate control to the inner flows, the way WireGuard does, with
-//!   a window ceiling and a persistent-congestion reset as the safety bound.
+//! Both `quic-engine` choices use [`LossTolerant`], which ignores ordinary
+//! loss and leaves rate control to the inner flows, with a window ceiling
+//! and a persistent-congestion reset. `fq-codel` adds inner-flow scheduling
+//! and CoDel queue management in `forward::fq_codel`.
 //!
 //! noq's BBR3 is not offered. On a netem-shaped link (40 ms RTT, 100 Mbit/s,
 //! 0 to 2% loss) it was slower than Cubic in every case, with ping spikes up to
@@ -46,25 +43,13 @@
 //! 443.50 / 859.00 ms (medians of two forward runs). At 80 Mbit/s offered in
 //! 1200-byte payloads, both delivered 80 Mbit/s and p99 stayed near 42 ms.
 //! These Linux measurements cover short runs, not long-term fairness or
-//! macOS/Wi-Fi behavior. Cubic remains selectable for latency-sensitive UDP.
+//! macOS/Wi-Fi behavior. Cubic was the comparison controller.
 
 use std::any::Any;
 use std::sync::Arc;
 use std::time::Instant;
 
 use iroh::endpoint::{Controller, ControllerFactory, RttEstimator};
-
-use crate::config::QuicCongestion;
-
-/// The factory to install for `cc`, or `None` to keep noq's default (Cubic).
-pub(crate) fn controller_factory(
-    cc: QuicCongestion,
-) -> Option<Arc<dyn ControllerFactory + Send + Sync + 'static>> {
-    match cc {
-        QuicCongestion::Cubic => None,
-        QuicCongestion::LossTolerant => Some(Arc::new(LossTolerantConfig::default())),
-    }
-}
 
 /// Starting window, matching noq's Cubic default (about ten
 /// 1200-byte datagrams) so a new path does not burst.
@@ -212,12 +197,6 @@ mod tests {
     fn congestion(cc: &mut LossTolerant, persistent: bool, ecn: bool) {
         let now = Instant::now();
         cc.on_congestion_event(now, now, persistent, ecn, 1200, 0);
-    }
-
-    #[test]
-    fn cubic_keeps_the_noq_default() {
-        assert!(controller_factory(QuicCongestion::Cubic).is_none());
-        assert!(controller_factory(QuicCongestion::LossTolerant).is_some());
     }
 
     #[test]

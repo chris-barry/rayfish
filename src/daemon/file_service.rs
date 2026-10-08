@@ -71,12 +71,7 @@ impl FileService {
     /// Best-effort and detached: a failed reclaim wastes disk, it never fails
     /// the transfer that triggered it, so the error is logged and swallowed.
     fn reclaim_blob(&self, tag: String) {
-        let store = self.transport.blob_store.clone();
-        tokio::spawn(async move {
-            if let Err(e) = store.tags().delete(&tag).await {
-                tracing::warn!(%tag, error = %e, "could not drop blob tag");
-            }
-        });
+        reclaim_blob(self.transport.blob_store.clone(), tag);
     }
 
     /// Point a persistent tag at a freshly imported blob so GC leaves it alone,
@@ -89,6 +84,36 @@ impl FileService {
             .set(tag, haf)
             .await
             .map_err(|e| format!("blob store error: {e}"))
+    }
+}
+
+fn reclaim_blob(store: FsStore, tag: String) {
+    tokio::spawn(async move {
+        if let Err(e) = store.tags().delete(&tag).await {
+            tracing::warn!(%tag, error = %e, "could not drop blob tag");
+        }
+    });
+}
+
+/// Return an unsuccessful receive to the queue, including when its task is canceled.
+struct ReceiveOfferGuard {
+    file: Option<PendingFile>,
+    pending: Arc<Mutex<Vec<PendingFile>>>,
+    transfers: Arc<transfers::TransferRegistry>,
+    store: FsStore,
+}
+
+impl Drop for ReceiveOfferGuard {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            let mut queue = self.pending.lock().unwrap();
+            if let Some(evicted) = evict_oldest_file(&mut queue, MAX_PENDING_FILES) {
+                let hash = iroh_blobs::Hash::from_bytes(*evicted.blob_hash.as_bytes());
+                reclaim_blob(self.store.clone(), blob_tags::recv(&hash, evicted.id));
+            }
+            queue.push(file);
+            self.transfers.changed();
+        }
     }
 }
 
@@ -151,9 +176,9 @@ pub(crate) struct PairingSession {
 /// to retry.
 pub(crate) const MAX_PENDING_FILES: usize = 256;
 
-/// Drop the oldest queued offer when `pending` is at `cap`, returning its id.
+/// Drop the oldest queued offer when `pending` is at `cap`, returning it.
 /// Offers are pushed in arrival order, so the oldest is the front.
-pub(crate) fn evict_oldest_file(pending: &mut Vec<PendingFile>, cap: usize) -> Option<u64> {
+pub(crate) fn evict_oldest_file(pending: &mut Vec<PendingFile>, cap: usize) -> Option<PendingFile> {
     if pending.len() < cap {
         return None;
     }
@@ -163,12 +188,12 @@ pub(crate) fn evict_oldest_file(pending: &mut Vec<PendingFile>, cap: usize) -> O
         from = %dropped.from.fmt_short(),
         "pending file-offer queue full; evicted oldest offer"
     );
-    Some(dropped.id)
+    Some(dropped)
 }
 
 /// Take the queued offer with `id` out of `pending`, if it is still there.
-/// Shared by accept and reject: both consume the entry, and neither may leave
-/// it behind for the other to act on a second time.
+/// Shared by accept and reject. Taking an offer prevents a second accept or
+/// reject from racing with its receive; a failed receive puts it back.
 pub(crate) fn take_pending(pending: &mut Vec<PendingFile>, id: u64) -> Option<PendingFile> {
     let i = pending.iter().position(|f| f.id == id)?;
     Some(pending.remove(i))
@@ -334,7 +359,13 @@ impl FileService {
                             tracing::info!(from = %from.fmt_short(), filename = %filename, size, "file offer received");
                             {
                                 let mut queue = pending.lock().unwrap();
-                                evict_oldest_file(&mut queue, MAX_PENDING_FILES);
+                                if let Some(evicted) =
+                                    evict_oldest_file(&mut queue, MAX_PENDING_FILES)
+                                {
+                                    let hash =
+                                        iroh_blobs::Hash::from_bytes(*evicted.blob_hash.as_bytes());
+                                    self.reclaim_blob(blob_tags::recv(&hash, evicted.id));
+                                }
                                 queue.push(PendingFile {
                                     id,
                                     from,
@@ -434,15 +465,14 @@ impl FileService {
     }
 
     /// Fetch a pending file's blob from its sender, write it to disk, and (when a
-    /// `peer_cred` is given) chown it to that user. Removes the pending entry.
+    /// `peer_cred` is given) chown it to that user. Failed receives stay queued
+    /// with their downloaded ranges so the destination can retry.
     pub(crate) async fn accept_file(
         self: &Arc<Self>,
         id: u64,
         output: Option<String>,
         peer_cred: Option<(u32, u32)>,
     ) -> IpcMessage {
-        #[cfg(windows)]
-        let _ = peer_cred;
         let pending_file = {
             let mut pending = self.pending_files.lock().unwrap();
             match take_pending(&mut pending, id) {
@@ -453,6 +483,37 @@ impl FileService {
             }
         };
 
+        let mut offer = ReceiveOfferGuard {
+            file: Some(pending_file),
+            pending: Arc::clone(&self.pending_files),
+            transfers: Arc::clone(&self.transfers),
+            store: self.transport.blob_store.clone(),
+        };
+        let file = offer
+            .file
+            .as_ref()
+            .expect("the offer is held until the receive succeeds");
+        let response = self.receive_file(file, output, peer_cred).await;
+        match response {
+            IpcMessage::Ok { .. } => {
+                offer.file.take();
+                response
+            }
+            IpcMessage::Error { message } => {
+                ipc_err(format!("{message}; retry with `ray files accept {id}`"))
+            }
+            other => other,
+        }
+    }
+
+    async fn receive_file(
+        &self,
+        pending_file: &PendingFile,
+        output: Option<String>,
+        peer_cred: Option<(u32, u32)>,
+    ) -> IpcMessage {
+        #[cfg(windows)]
+        let _ = peer_cred;
         let blob_hash = iroh_blobs::Hash::from_bytes(*pending_file.blob_hash.as_bytes());
         let peer_label = pending_file.from.fmt_short().to_string();
         let transfer_id = self.transfers.register_receive(
@@ -464,23 +525,11 @@ impl FileService {
         // while the connection and fetch are in progress.
         let finish_guard = transfers::FinishGuard::new(Arc::clone(&self.transfers), transfer_id);
 
-        let conn = match transport::connect_to_peer_with_alpn(
-            &self.transport.endpoint,
-            pending_file.from,
-            iroh_blobs::protocol::ALPN,
-        )
-        .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                return ipc_err(format!("cannot reach sender: {e}"));
-            }
-        };
-
         // Claim the blob before fetching it. `fetch` leaves what it downloads
         // untagged, so a GC triggered by some other transfer finishing mid-fetch
         // would sweep the bytes out from under us. The tag is dropped again as
-        // soon as the file reaches its destination, on every exit path below.
+        // soon as the file reaches its destination or the offer is rejected.
+        // Failed receives keep the tag so a retry can reuse the downloaded ranges.
         let recv_tag = blob_tags::recv(&blob_hash, pending_file.id);
         if let Err(e) = self
             .transport
@@ -492,30 +541,49 @@ impl FileService {
             return ipc_err(format!("blob store error: {e}"));
         }
 
-        // `fetch` returns a `GetProgress`: awaiting it directly discards the
-        // progress, so take the stream instead and report bytes as they land. It
-        // yields `Progress(n)` items (n = payload bytes read so far) and exactly
-        // one terminal `Done`/`Error` item. Note: reaching `Done` here means only
-        // the fetch succeeded, not the transfer; the registry is not finished
-        // until the file is written to disk below.
-        let mut stream = Box::pin(
-            self.transport
-                .blob_store
-                .remote()
-                .fetch(conn, iroh_blobs::HashAndFormat::raw(blob_hash))
-                .stream(),
-        );
-        loop {
-            match stream.next().await {
-                Some(GetProgressItem::Progress(n)) => self.transfers.note_progress(transfer_id, n),
-                Some(GetProgressItem::Done(_)) => break,
-                Some(GetProgressItem::Error(e)) => {
-                    self.reclaim_blob(recv_tag);
-                    return ipc_err(format!("blob fetch failed: {e}"));
-                }
-                None => {
-                    self.reclaim_blob(recv_tag);
-                    return ipc_err("blob fetch ended without a result".to_string());
+        let local = match self.transport.blob_store.remote().local(blob_hash).await {
+            Ok(local) => local,
+            Err(e) => return ipc_err(format!("blob store error: {e}")),
+        };
+        let downloaded = local.local_bytes();
+        self.transfers.note_progress(transfer_id, downloaded);
+        if !local.is_complete() {
+            let connect = transport::connect_to_peer_with_alpn(
+                &self.transport.endpoint,
+                pending_file.from,
+                iroh_blobs::protocol::ALPN,
+            );
+            let conn = match tokio::time::timeout(OFFER_CONNECT_TIMEOUT, connect).await {
+                Ok(Ok(conn)) => conn,
+                Ok(Err(e)) => return ipc_err(format!("cannot reach sender: {e}")),
+                Err(_) => return ipc_err("cannot reach sender: connection timed out"),
+            };
+
+            // `fetch` returns a `GetProgress`: awaiting it directly discards the
+            // progress, so take the stream instead and report bytes as they land. It
+            // yields `Progress(n)` items (n = payload bytes read so far) and exactly
+            // one terminal `Done`/`Error` item. Note: reaching `Done` here means only
+            // the fetch succeeded, not the transfer; the registry is not finished
+            // until the file is written to disk below.
+            let mut stream = Box::pin(
+                self.transport
+                    .blob_store
+                    .remote()
+                    .fetch(conn, iroh_blobs::HashAndFormat::raw(blob_hash))
+                    .stream(),
+            );
+            loop {
+                match stream.next().await {
+                    Some(GetProgressItem::Progress(n)) => self
+                        .transfers
+                        .note_progress(transfer_id, downloaded.saturating_add(n)),
+                    Some(GetProgressItem::Done(_)) => break,
+                    Some(GetProgressItem::Error(e)) => {
+                        return ipc_err(format!("blob fetch failed: {e}"));
+                    }
+                    None => {
+                        return ipc_err("blob fetch ended without a result".to_string());
+                    }
                 }
             }
         }
@@ -530,7 +598,6 @@ impl FileService {
         };
 
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.reclaim_blob(recv_tag);
             return ipc_err(format!("cannot create directory '{}': {e}", dir.display()));
         }
 
@@ -548,7 +615,6 @@ impl FileService {
             .export(blob_hash, &dest)
             .await
         {
-            self.reclaim_blob(recv_tag);
             return ipc_err(format!("write failed: {e}"));
         }
         // The file is where the user wanted it, so the store's copy is now pure
@@ -808,8 +874,7 @@ impl FileService {
     /// points at them. Driven by the provider's `Completed` event, which is the
     /// only authoritative "they got it" a sender ever gets.
     ///
-    /// Not called on an aborted pull: a peer that gave up halfway will retry, and
-    /// the outbox offer is still live.
+    /// Not called on an aborted pull: keep the bytes for the receiver's retry.
     pub(crate) fn note_send_completed(self: &Arc<Self>, hash: iroh_blobs::Hash, peer: EndpointId) {
         let hash = blake3::Hash::from_bytes(*hash.as_bytes());
         self.reclaim_blob(blob_tags::send(&hash, &peer));
@@ -1033,11 +1098,13 @@ impl FileService {
     }
 
     /// Decline a pending file offer: drop it from the queue without fetching the
-    /// blob. In-memory only, mirroring how `accept_file` consumes the entry.
+    /// blob. Release any data retained from an unsuccessful receive.
     pub(crate) fn reject_file(&self, id: u64) -> IpcMessage {
         let mut pending = self.pending_files.lock().unwrap();
         match take_pending(&mut pending, id) {
             Some(f) => {
+                let hash = iroh_blobs::Hash::from_bytes(*f.blob_hash.as_bytes());
+                self.reclaim_blob(blob_tags::recv(&hash, f.id));
                 self.transfers.changed();
                 IpcMessage::Ok {
                     message: format!("declined {} from {}", f.filename, f.from.fmt_short()),
@@ -1312,6 +1379,97 @@ mod tests {
         );
         assert!(take_pending(&mut queue, 99).is_none());
         assert_eq!(queue.len(), 2, "a miss leaves the queue untouched");
+    }
+
+    #[tokio::test]
+    async fn canceled_receive_restores_the_offer_and_keeps_its_blob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = gc_store(tmp.path()).await;
+        let src = tmp.path().join("payload.bin");
+        std::fs::write(&src, vec![7u8; 64 * 1024]).unwrap();
+        let temp = store.blobs().add_path(&src).temp_tag().await.unwrap();
+        let hash = temp.hash();
+        let tag = blob_tags::recv(&hash, 1);
+        store
+            .tags()
+            .set(&tag, temp.hash_and_format())
+            .await
+            .unwrap();
+        drop(temp);
+
+        let mut file = pending(1);
+        file.blob_hash = blake3::Hash::from_bytes(*hash.as_bytes());
+        let queue = Arc::new(Mutex::new(vec![file, pending(2)]));
+        let transfers = Arc::new(transfers::TransferRegistry::new());
+        let mut changes = transfers.subscribe();
+        let offer = ReceiveOfferGuard {
+            file: take_pending(&mut queue.lock().unwrap(), 1),
+            pending: Arc::clone(&queue),
+            transfers,
+            store: store.clone(),
+        };
+        assert!(take_pending(&mut queue.lock().unwrap(), 1).is_none());
+        assert!(!changes.has_changed().unwrap());
+        drop(offer);
+        changes.changed().await.unwrap();
+
+        let retried = take_pending(&mut queue.lock().unwrap(), 1).unwrap();
+        assert_eq!(retried.blob_hash.as_bytes(), hash.as_bytes());
+        assert_eq!(queue.lock().unwrap()[0].id, 2);
+        let junk = canary(&store, tmp.path(), "canary.bin").await;
+        collected(&store, junk, "the untagged canary").await;
+        assert!(store.blobs().has(hash).await.unwrap());
+
+        // Once the retained receive tag is released, GC can collect the data.
+        reclaim_blob(store.clone(), tag);
+        collected(&store, hash, "the rejected receive").await;
+    }
+
+    #[tokio::test]
+    async fn successful_receive_does_not_restore_the_offer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FsStore::load(tmp.path()).await.unwrap();
+        let queue = Arc::new(Mutex::new(vec![pending(2)]));
+        let mut offer = ReceiveOfferGuard {
+            file: Some(pending(1)),
+            pending: Arc::clone(&queue),
+            transfers: Arc::new(transfers::TransferRegistry::new()),
+            store,
+        };
+        offer.file.take();
+        drop(offer);
+        assert!(take_pending(&mut queue.lock().unwrap(), 1).is_none());
+        assert_eq!(queue.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn restored_receive_caps_the_queue_and_reclaims_evicted_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = gc_store(tmp.path()).await;
+        let src = tmp.path().join("payload.bin");
+        std::fs::write(&src, vec![5u8; 64 * 1024]).unwrap();
+        let temp = store.blobs().add_path(&src).temp_tag().await.unwrap();
+        let hash = temp.hash();
+        store
+            .tags()
+            .set(blob_tags::recv(&hash, 1), temp.hash_and_format())
+            .await
+            .unwrap();
+        drop(temp);
+        let mut files: Vec<_> = (1..=MAX_PENDING_FILES as u64).map(pending).collect();
+        files[0].blob_hash = blake3::Hash::from_bytes(*hash.as_bytes());
+        let queue = Arc::new(Mutex::new(files));
+        let offer = ReceiveOfferGuard {
+            file: Some(pending(999)),
+            pending: Arc::clone(&queue),
+            transfers: Arc::new(transfers::TransferRegistry::new()),
+            store: store.clone(),
+        };
+        drop(offer);
+        assert_eq!(queue.lock().unwrap().len(), MAX_PENDING_FILES);
+        assert!(take_pending(&mut queue.lock().unwrap(), 1).is_none());
+        assert!(take_pending(&mut queue.lock().unwrap(), 999).is_some());
+        collected(&store, hash, "the evicted receive").await;
     }
 
     /// Pins the outbox persistence format: `EndpointId` and `blake3::Hash`

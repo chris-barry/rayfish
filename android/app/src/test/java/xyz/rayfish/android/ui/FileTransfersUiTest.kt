@@ -11,9 +11,11 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import uniffi.ray_mobile.FileOffer
 import uniffi.ray_mobile.Status
 import uniffi.ray_mobile.Transfer
 import uniffi.ray_mobile.TransferState
+import xyz.rayfish.android.OfferNotifier
 import xyz.rayfish.android.R
 import xyz.rayfish.android.ui.screens.HomeScreen
 import xyz.rayfish.android.ui.theme.RayfishTheme
@@ -40,6 +42,19 @@ class FileTransfersUiTest {
         for (terminal in listOf(TransferState.DONE, TransferState.FAILED)) {
             compose.runOnIdle { state.value = terminal }
             compose.onNodeWithText(app.getString(R.string.action_cancel)).assertDoesNotExist()
+        }
+    }
+
+    @Test fun interruptedReceiveShowsRetryInHome() {
+        val offer = FileOffer(123uL, "peer", "file.txt", 100uL, "text/plain", false)
+        val snapshot = snapshot(false, TransferState.FAILED).copy(files = listOf(offer))
+        OfferNotifier.markFailed(app, offer.id)
+        try {
+            compose.setContent { RayfishTheme { HomeScreen(snapshot, false, {}) } }
+            compose.onNodeWithText(app.getString(R.string.action_retry)).assertExists()
+            compose.onNodeWithText(app.getString(R.string.action_save)).assertDoesNotExist()
+        } finally {
+            OfferNotifier.reset(app)
         }
     }
 

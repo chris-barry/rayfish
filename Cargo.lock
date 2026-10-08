@@ -5794,7 +5794,7 @@ dependencies = [
 
 [[package]]
 name = "ray-proto"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5828,7 +5828,7 @@ dependencies = [
 
 [[package]]
 name = "rayfish"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "ahash",
  "anyhow",

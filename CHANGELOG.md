@@ -8,14 +8,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Experimental `ray config set quic-engine fq-codel` gives inner flows
+  separate queues and favors sparse traffic over bulk transfers. It combines
+  CoDel queue management with loss-tolerant congestion control and applies after restarting the daemon.
+
 - `ray files auto-accept add/remove <peer>` saves trusted file senders; `list`
   shows their identities. The macOS Files page can add and remove them too.
 
 ### Changed
 
-- Loss-tolerant QUIC congestion control is the default for new or unset
-  configurations, improving TCP throughput on lossy links. Saved controller
-  choices are preserved; Cubic remains available for latency-sensitive UDP.
+- `quic-engine` replaces `quic-congestion`, with `standalone` (default) and
+  `fq-codel` choices. Both use loss-tolerant congestion control. Saved controller
+  settings migrate to the corresponding engine. macOS Settings and Android You
+  offer an engine selector and a reconnect or restart action.
+
+### Fixed
+
+- Failed file downloads stay in `ray files` for retry with `ray files accept <id>`,
+  reusing data already downloaded. Android offers Retry on Home and in notifications.
+
+- SSH to your own mesh address permits your local account without a password.
+  Root may select any account; mesh SSH grants do not apply to local callers.
+
+- Peer send queue metrics include the FQ-CoDel backlog and use the selected
+  engine's QUIC buffer size.
+
+- Network-scoped firewall rules apply to peers sharing that network, regardless
+  of which shared network carries their packets.
 
 ## [0.5.7] - 2026-10-03
 
@@ -49,6 +68,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- New members and reconnecting peers no longer get stuck with a connection
+  that appears online but cannot carry traffic.
 - The macOS app version now matches the Rayfish version in `Cargo.toml`.
 - IPv4 listener bridging is enabled by default on fresh installs and starts
   with the macOS app's VPN. An explicit `v4-bridge off` setting is preserved.
